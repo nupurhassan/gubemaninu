@@ -17,7 +17,7 @@
 @if "%DEBUG%" == "" @echo off
 @rem ##########################################################################
 @rem
-@rem  Starter3-2 startup script for Windows
+@rem  gubemaninu startup script for Windows
 @rem
 @rem ##########################################################################
 
@@ -32,7 +32,7 @@ set APP_HOME=%DIRNAME%..
 @rem Resolve any "." and ".." in APP_HOME to make it shorter.
 for %%i in ("%APP_HOME%") do set APP_HOME=%%~fi
 
-@rem Add default JVM options here. You can also use JAVA_OPTS and STARTER3_2_OPTS to pass JVM options to this script.
+@rem Add default JVM options here. You can also use JAVA_OPTS and GUBEMANINU_OPTS to pass JVM options to this script.
 set DEFAULT_JVM_OPTS=
 
 @rem Find java.exe
@@ -67,20 +67,20 @@ goto fail
 :execute
 @rem Setup the command line
 
-set CLASSPATH=%APP_HOME%\lib\Starter3-2.jar;%APP_HOME%\lib\json-20200518.jar
+set CLASSPATH=%APP_HOME%\lib\gubemaninu.jar;%APP_HOME%\lib\json-20200518.jar
 
 
-@rem Execute Starter3-2
-"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %STARTER3_2_OPTS%  -classpath "%CLASSPATH%" Concentration %*
+@rem Execute gubemaninu
+"%JAVA_EXE%" %DEFAULT_JVM_OPTS% %JAVA_OPTS% %GUBEMANINU_OPTS%  -classpath "%CLASSPATH%" Concentration %*
 
 :end
 @rem End local scope for the variables with windows NT shell
 if "%ERRORLEVEL%"=="0" goto mainEnd
 
 :fail
-rem Set variable STARTER3_2_EXIT_CONSOLE if you need the _script_ return code instead of
+rem Set variable GUBEMANINU_EXIT_CONSOLE if you need the _script_ return code instead of
 rem the _cmd.exe /c_ return code!
-if  not "" == "%STARTER3_2_EXIT_CONSOLE%" exit 1
+if  not "" == "%GUBEMANINU_EXIT_CONSOLE%" exit 1
 exit /b 1
 
 :mainEnd
