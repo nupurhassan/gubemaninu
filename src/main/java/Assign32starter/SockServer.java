@@ -38,7 +38,7 @@ public class SockServer {
 	private static final String LEADERBOARD_FILE = "leaderboard.json";
 
 	// ---------------------------
-	// NEW: HINT CLASS
+	// HINT CLASS (with image and funny text)
 	// ---------------------------
 	private static class Hint {
 		String image;
@@ -50,7 +50,7 @@ public class SockServer {
 	}
 
 	// ---------------------------
-	// WONDER DATA – now with a list of Hint objects
+	// WONDER CLASS – each wonder now has a list of Hint objects
 	// ---------------------------
 	private static class Wonder {
 		List<Hint> hints;
@@ -66,15 +66,15 @@ public class SockServer {
 			new Wonder(
 					Arrays.asList(
 							new Hint("img/Colosseum1.png", "Hint 1: Looks like a giant pizza oven in ancient Rome!"),
-							new Hint("img/Colosseum2.png", "Hint 2: An arena where gladiators once battled (and maybe joked around)."),
+							new Hint("img/Colosseum2.png", "Hint 2: An arena where gladiators once battled (and cracked jokes)."),
 							new Hint("img/Colosseum3.png", "Hint 3: Imagine gladiators doing stand-up comedy here!"),
-							new Hint("img/Colosseum4.png", "Hint 4: Once hosted wild chariot races—faster than today's NASCAR!")
+							new Hint("img/Colosseum4.png", "Hint 4: Once hosted wild chariot races – faster than today’s NASCAR!")
 					),
 					"colosseum"
 			),
 			new Wonder(
 					Arrays.asList(
-							new Hint("img/GrandCanyon1.png", "Hint 1: A giant crack in the Earth—nature’s artwork!"),
+							new Hint("img/GrandCanyon1.png", "Hint 1: A giant crack in the Earth – nature’s artwork!"),
 							new Hint("img/GrandCanyon2.png", "Hint 2: Not a swimming pool, but massive and awe-inspiring."),
 							new Hint("img/GrandCanyon3.png", "Hint 3: Even the birds seem to pause and take a look."),
 							new Hint("img/GrandCanyon4.png", "Hint 4: Carved over millions of years, it's simply breathtaking.")
@@ -96,7 +96,7 @@ public class SockServer {
 	// CURRENT WONDER & HINT INFO
 	// ---------------------------
 	private static Wonder currentWonder = null;
-	private static int hintIndex = 0;  // Valid values 0..3 for 4 hints.
+	private static int hintIndex = 0;  // Valid indices: 0 .. MAX_HINTS-1 (here, 0..3)
 	private static final int MAX_HINTS = 4;
 	private static String currentCorrectAnswer = "";
 
@@ -105,14 +105,7 @@ public class SockServer {
 	// ---------------------------
 	private static final Random random = new Random();
 
-	// ---------------------------
-	// NEW: Flags for placeholder behavior
-	// ---------------------------
-	private static boolean placeholderActive = false;
-	private static String pendingCommand = "";
-
 	public static void main(String[] args) {
-		// Load persistent leaderboard if available.
 		loadLeaderboard();
 
 		try (ServerSocket serv = new ServerSocket(8888)) {
@@ -133,8 +126,7 @@ public class SockServer {
 	}
 
 	/**
-	 * Handle a client connection by reading a JSON request and sending responses.
-	 * Some commands (like skip/next) may send two responses.
+	 * Handle a client connection by reading a JSON request and sending a JSON response.
 	 */
 	private static void handleClient(Socket sock) {
 		try (ObjectInputStream in = new ObjectInputStream(sock.getInputStream());
@@ -181,7 +173,6 @@ public class SockServer {
 						break;
 					case WAITING_FOR_GUESS:
 						handleGuess(response, type, value, outWrite);
-						if (response.length() == 0) return;
 						break;
 				}
 			} catch (Exception e) {
@@ -274,8 +265,7 @@ public class SockServer {
 				response.put("image", "the image: " + getCurrentHintImage());
 				response.put("value", "Great! We'll play for " + totalRounds + " rounds.\n"
 						+ "Now starting round " + currentRound + " of " + totalRounds + ".\n"
-						+ "Guess which wonder is shown.\n"
-						+ getCurrentHintText());
+						+ "Guess which wonder is shown.\n" + getCurrentHintText());
 				state = GameState.WAITING_FOR_GUESS;
 			}
 		} catch (NumberFormatException nfe) {
@@ -288,13 +278,14 @@ public class SockServer {
 	// WAITING_FOR_GUESS
 	// -----------------------------
 	/**
-	 * In the guessing state the user may:
+	 * In the guessing state, the user may:
 	 * - Type a guess.
-	 * - Type "skip" to discard the current wonder.
-	 *   When "skip" is first typed, a placeholder is sent and the command is pending.
-	 *   The user must type "next" to reveal a new wonder.
-	 * - Type "next" similarly for showing the next hint.
-	 * - Type "remain" or "remaining" to see how many hints remain.
+	 * - Type "skip" to immediately discard the current wonder and advance to a new wonder.
+	 * - Type "next" to show the next hint (if available) for the current wonder.
+	 * - Type "remain" (or "remaining") to see how many hints remain.
+	 *
+	 * When a guess is correct, points are awarded and a new wonder is selected.
+	 * For "skip," 0 points are awarded and the round advances with a new wonder.
 	 */
 	private static void handleGuess(JSONObject response, String type, String value, PrintWriter outWrite) {
 		if (!type.equals("input") || value.isEmpty()) {
@@ -304,67 +295,46 @@ public class SockServer {
 		}
 		String command = value.toLowerCase();
 
-		// If a placeholder is active, only "next" is allowed to clear it.
-		if (placeholderActive) {
-			if (!command.equals("next")) {
-				response.put("type", "error");
-				response.put("value", "Please type 'next' to reveal the wonder.");
-				return;
+		// Process "skip": end the current round with 0 points and show a new wonder.
+		if (command.equals("skip")) {
+			roundsLeft--;
+			response.put("type", "prompt");
+			response.put("value", "You chose to skip this round (0 points awarded).");
+			if (roundsLeft > 0) {
+				currentRound++;
+				selectRandomWonder();
+				response.put("image", "the image: " + getCurrentHintImage());
+				response.put("value", "Now starting round " + currentRound + " of " + totalRounds + ".\nGuess which wonder is shown.\n" + getCurrentHintText());
 			} else {
-				if (pendingCommand.equals("skip")) {
-					selectRandomWonder();
-					JSONObject newWonderResp = new JSONObject();
-					newWonderResp.put("type", "prompt");
-					newWonderResp.put("image", "the image: " + getCurrentHintImage());
-					newWonderResp.put("value", "Here is a new wonder for round " + currentRound + " of " + totalRounds + ".\nGuess which wonder is shown.\n" + getCurrentHintText());
-					outWrite.println(newWonderResp.toString());
-				} else if (pendingCommand.equals("next")) {
-					if (hintIndex < MAX_HINTS - 1) {
-						hintIndex++;
-						JSONObject nextHintResp = new JSONObject();
-						nextHintResp.put("type", "prompt");
-						nextHintResp.put("value", "Showing next hint for the same wonder. (Hint " + (hintIndex + 1) + "/" + MAX_HINTS + ")\n" + getCurrentHintText());
-						nextHintResp.put("image", "the image: " + getCurrentHintImage());
-						outWrite.println(nextHintResp.toString());
-					} else {
-						JSONObject noMoreHintsResp = new JSONObject();
-						noMoreHintsResp.put("type", "prompt");
-						noMoreHintsResp.put("value", "No more hints for this wonder.");
-						outWrite.println(noMoreHintsResp.toString());
-					}
-				}
-				placeholderActive = false;
-				pendingCommand = "";
-				return;
+				endGame(response);
 			}
-		}
-
-		// If no placeholder is active, check if command is "skip" or "next".
-		if (command.equals("skip") || command.equals("next")) {
-			placeholderActive = true;
-			pendingCommand = command;
-			JSONObject placeholderResp = new JSONObject();
-			if (command.equals("skip")) {
-				placeholderResp.put("value", "You chose to skip this wonder (0 points awarded).");
-			} else {
-				placeholderResp.put("value", "Preparing to show the next hint...");
-			}
-			placeholderResp.put("type", "prompt");
-			placeholderResp.put("image", "the image: img/placeholder.png");
-			outWrite.println(placeholderResp.toString());
 			return;
 		}
 
-		// "remain" or "remaining": show number of hints remaining.
+		// Process "next": show the next hint for the current wonder if available.
+		if (command.equals("next")) {
+			if (hintIndex < MAX_HINTS - 1) {
+				hintIndex++;
+				response.put("type", "prompt");
+				response.put("image", "the image: " + getCurrentHintImage());
+				response.put("value", "Showing next hint (Hint " + (hintIndex + 1) + "/" + MAX_HINTS + "):\n" + getCurrentHintText());
+			} else {
+				response.put("type", "prompt");
+				response.put("value", "No more hints for this wonder.");
+			}
+			return;
+		}
+
+		// Process "remain" or "remaining": report how many hints remain.
 		if (command.equals("remain") || command.equals("remaining")) {
 			int hintsLeft = (MAX_HINTS - 1) - hintIndex;
 			response.put("type", "prompt");
-			response.put("value", "Hints remaining for this wonder: " + hintsLeft
+			response.put("value", "Hints remaining: " + hintsLeft
 					+ "\n(You are currently on hint #" + (hintIndex + 1) + ")");
 			return;
 		}
 
-		// Otherwise, treat input as a guess.
+		// Otherwise, treat the input as a guess.
 		if (command.equals(currentCorrectAnswer)) {
 			int remainingHints = (MAX_HINTS - 1) - hintIndex;
 			int scoreThisRound = remainingHints * 5 + 5;
@@ -423,7 +393,7 @@ public class SockServer {
 	private static void selectRandomWonder() {
 		int index = random.nextInt(wonderList.size());
 		Wonder base = wonderList.get(index);
-		// Create a new list from the base hints and shuffle to randomize order.
+		// Shuffle the hints for a random order.
 		List<Hint> shuffled = new ArrayList<>(base.hints);
 		Collections.shuffle(shuffled, random);
 		currentWonder = new Wonder(shuffled, base.answer);
