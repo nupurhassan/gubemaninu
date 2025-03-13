@@ -4,23 +4,10 @@ import java.net.*;
 import java.io.*;
 import java.util.*;
 import org.json.*;
-
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.charset.StandardCharsets;
 
-/**
- * SockServer
- * ----------
- * Features:
- * 1) Multiple Wonders (4 hints each)
- * 2) Round-limited: user chooses # of rounds
- * 3) Supports commands: skip, next, remain, guess
- * 4) Score formula: (remainingHints * 5) + 5 for correct guess
- * 5) Persistent Leaderboard (stored in leaderboard.json)
- * 6) Displays "win.jpg" if user wins (>0 points) and "lose.jpg" if score is 0
- * 7) Option B: When "skip" is typed, a new wonder is chosen for the same round.
- */
 public class SockServer {
 
 	// ---------------------------
@@ -33,7 +20,6 @@ public class SockServer {
 		WAITING_FOR_ROUNDS,
 		WAITING_FOR_GUESS
 	}
-
 	private static GameState state = GameState.WAITING_FOR_HELLO;
 
 	// ---------------------------
@@ -46,47 +32,87 @@ public class SockServer {
 	private static int currentRound = 0;
 
 	// ---------------------------
-	// LEADERBOARD
+	// LEADERBOARD (Persistent)
 	// ---------------------------
 	private static Map<String, Integer> leaderboard = new HashMap<>();
 	private static final String LEADERBOARD_FILE = "leaderboard.json";
 
 	// ---------------------------
-	// WONDER DATA
+	// NEW: HINT CLASS
+	// ---------------------------
+	private static class Hint {
+		String image;
+		String funnyText;
+		Hint(String image, String funnyText) {
+			this.image = image;
+			this.funnyText = funnyText;
+		}
+	}
+
+	// ---------------------------
+	// WONDER DATA – now with a list of Hint objects
 	// ---------------------------
 	private static class Wonder {
-		List<String> images;
+		List<Hint> hints;
 		String answer;
-		Wonder(List<String> images, String answer) {
-			this.images = images;
+		Wonder(List<Hint> hints, String answer) {
+			this.hints = hints;
 			this.answer = answer.toLowerCase();
 		}
 	}
 
-	// List of wonders (with 4 hints each)
+	// Define wonders with 4 funny hints each.
 	private static List<Wonder> wonderList = new ArrayList<>(Arrays.asList(
 			new Wonder(
-					Arrays.asList("img/Colosseum1.png", "img/Colosseum2.png", "img/Colosseum3.png", "img/Colosseum4.png"),
+					Arrays.asList(
+							new Hint("img/Colosseum1.png", "Hint 1: Looks like a giant pizza oven in ancient Rome!"),
+							new Hint("img/Colosseum2.png", "Hint 2: An arena where gladiators once battled (and maybe joked around)."),
+							new Hint("img/Colosseum3.png", "Hint 3: Imagine gladiators doing stand-up comedy here!"),
+							new Hint("img/Colosseum4.png", "Hint 4: Once hosted wild chariot races—faster than today's NASCAR!")
+					),
 					"colosseum"
 			),
 			new Wonder(
-					Arrays.asList("img/GrandCanyon1.png", "img/GrandCanyon2.png", "img/GrandCanyon3.png", "img/GrandCanyon4.png"),
+					Arrays.asList(
+							new Hint("img/GrandCanyon1.png", "Hint 1: A giant crack in the Earth—nature’s artwork!"),
+							new Hint("img/GrandCanyon2.png", "Hint 2: Not a swimming pool, but massive and awe-inspiring."),
+							new Hint("img/GrandCanyon3.png", "Hint 3: Even the birds seem to pause and take a look."),
+							new Hint("img/GrandCanyon4.png", "Hint 4: Carved over millions of years, it's simply breathtaking.")
+					),
 					"grand canyon"
 			),
 			new Wonder(
-					Arrays.asList("img/Stonehenge1.png", "img/Stonehenge2.png", "img/Stonehenge3.png", "img/Stonehenge4.png"),
+					Arrays.asList(
+							new Hint("img/Stonehenge1.png", "Hint 1: Massive stones arranged like nature’s rock concert stage!"),
+							new Hint("img/Stonehenge2.png", "Hint 2: Looks like a prehistoric parking lot for giant rocks."),
+							new Hint("img/Stonehenge3.png", "Hint 3: The ultimate stone puzzle – nature’s Lego without instructions!"),
+							new Hint("img/Stonehenge4.png", "Hint 4: Mysterious and ancient; a timeless gathering of stones.")
+					),
 					"stonehenge"
 			)
 	));
 
-	// Current wonder/hint information
+	// ---------------------------
+	// CURRENT WONDER & HINT INFO
+	// ---------------------------
 	private static Wonder currentWonder = null;
-	private static int hintIndex = 0;  // 0..3 for 4 hints
+	private static int hintIndex = 0;  // Valid values 0..3 for 4 hints.
 	private static final int MAX_HINTS = 4;
 	private static String currentCorrectAnswer = "";
 
+	// ---------------------------
+	// For random operations
+	// ---------------------------
+	private static final Random random = new Random();
+
+	// ---------------------------
+	// NEW: Flags for placeholder behavior
+	// ---------------------------
+	private static boolean placeholderActive = false;
+	private static String pendingCommand = "";
+
 	public static void main(String[] args) {
-		// Load persistent leaderboard if available
+		// Load persistent leaderboard if available.
 		loadLeaderboard();
 
 		try (ServerSocket serv = new ServerSocket(8888)) {
@@ -107,7 +133,8 @@ public class SockServer {
 	}
 
 	/**
-	 * Handle a client connection by reading a JSON request and sending a JSON response.
+	 * Handle a client connection by reading a JSON request and sending responses.
+	 * Some commands (like skip/next) may send two responses.
 	 */
 	private static void handleClient(Socket sock) {
 		try (ObjectInputStream in = new ObjectInputStream(sock.getInputStream());
@@ -116,7 +143,6 @@ public class SockServer {
 			String inputStr = (String) in.readObject();
 			System.out.println("Server received: " + inputStr);
 
-			// Parse JSON request
 			JSONObject request;
 			try {
 				request = new JSONObject(inputStr);
@@ -128,7 +154,6 @@ public class SockServer {
 				return;
 			}
 
-			// Prepare response JSON
 			JSONObject response = new JSONObject();
 			String type = request.optString("type", "unknown");
 			String value = request.optString("value", "").trim();
@@ -138,30 +163,25 @@ public class SockServer {
 					case WAITING_FOR_HELLO:
 						if (type.equals("hello")) {
 							response.put("type", "prompt");
-							response.put("value",
-									"Hello,\nPlease enter your name and age\n(name age, example: Nupur 21)"
-							);
+							response.put("value", "Hello,\nPlease enter your name and age\n(name age, example: Nupur 21)");
 							state = GameState.WAITING_FOR_NAME_AGE;
 						} else {
 							response.put("type", "error");
 							response.put("value", "Expected 'hello' to start.");
 						}
 						break;
-
 					case WAITING_FOR_NAME_AGE:
 						handleNameAge(response, type, value);
 						break;
-
 					case WAITING_FOR_CHOICE:
 						handleChoice(response, type, value);
 						break;
-
 					case WAITING_FOR_ROUNDS:
 						handleRounds(response, type, value);
 						break;
-
 					case WAITING_FOR_GUESS:
-						handleGuess(response, type, value);
+						handleGuess(response, type, value, outWrite);
+						if (response.length() == 0) return;
 						break;
 				}
 			} catch (Exception e) {
@@ -196,13 +216,8 @@ public class SockServer {
 		try {
 			playerAge = Integer.parseInt(tokens[1]);
 			response.put("type", "prompt");
-			response.put("value",
-					"Hello " + playerName + " (" + playerAge + ")\n"
-							+ "Choose an option:\n"
-							+ "1) See Leaderboard\n"
-							+ "2) Start the game\n"
-							+ "3) Quit"
-			);
+			response.put("value", "Hello " + playerName + " (" + playerAge + ")\n"
+					+ "Choose an option:\n1) See Leaderboard\n2) Start the game\n3) Quit");
 			state = GameState.WAITING_FOR_CHOICE;
 		} catch (NumberFormatException nfe) {
 			response.put("type", "error");
@@ -220,12 +235,10 @@ public class SockServer {
 			return;
 		}
 		if (value.equals("1")) {
-			// Show leaderboard
 			String lb = getLeaderboardString();
 			response.put("type", "prompt");
 			response.put("value", lb);
 		} else if (value.equals("2")) {
-			// Ask how many rounds to play
 			response.put("type", "prompt");
 			response.put("value", "Please enter the number of rounds the game should last.");
 			state = GameState.WAITING_FOR_ROUNDS;
@@ -257,14 +270,12 @@ public class SockServer {
 				roundsLeft = num;
 				currentRound = 1;
 				selectRandomWonder();
-
 				response.put("type", "prompt");
 				response.put("image", "the image: " + getCurrentHintImage());
-				response.put("value",
-						"Great! We'll play for " + totalRounds + " rounds.\n"
-								+ "Now starting round " + currentRound + " of " + totalRounds + ".\n"
-								+ "Guess which wonder is shown."
-				);
+				response.put("value", "Great! We'll play for " + totalRounds + " rounds.\n"
+						+ "Now starting round " + currentRound + " of " + totalRounds + ".\n"
+						+ "Guess which wonder is shown.\n"
+						+ getCurrentHintText());
 				state = GameState.WAITING_FOR_GUESS;
 			}
 		} catch (NumberFormatException nfe) {
@@ -277,123 +288,126 @@ public class SockServer {
 	// WAITING_FOR_GUESS
 	// -----------------------------
 	/**
-	 * The user can:
-	 * - Type a guess (to be compared to the current wonder's answer)
-	 * - Type "skip" to discard the current wonder and get a new one for the same round (Option B)
-	 * - Type "next" to show the next hint if available
-	 * - Type "remain" or "remaining" to see how many hints remain
+	 * In the guessing state the user may:
+	 * - Type a guess.
+	 * - Type "skip" to discard the current wonder.
+	 *   When "skip" is first typed, a placeholder is sent and the command is pending.
+	 *   The user must type "next" to reveal a new wonder.
+	 * - Type "next" similarly for showing the next hint.
+	 * - Type "remain" or "remaining" to see how many hints remain.
 	 */
-	private static void handleGuess(JSONObject response, String type, String value) {
+	private static void handleGuess(JSONObject response, String type, String value, PrintWriter outWrite) {
 		if (!type.equals("input") || value.isEmpty()) {
 			response.put("type", "error");
 			response.put("value", "Please enter a guess (or 'skip', 'next', 'remain').");
 			return;
 		}
-		String guess = value.toLowerCase();
+		String command = value.toLowerCase();
 
-		// 1) Correct guess
-		if (guess.equals(currentCorrectAnswer)) {
+		// If a placeholder is active, only "next" is allowed to clear it.
+		if (placeholderActive) {
+			if (!command.equals("next")) {
+				response.put("type", "error");
+				response.put("value", "Please type 'next' to reveal the wonder.");
+				return;
+			} else {
+				if (pendingCommand.equals("skip")) {
+					selectRandomWonder();
+					JSONObject newWonderResp = new JSONObject();
+					newWonderResp.put("type", "prompt");
+					newWonderResp.put("image", "the image: " + getCurrentHintImage());
+					newWonderResp.put("value", "Here is a new wonder for round " + currentRound + " of " + totalRounds + ".\nGuess which wonder is shown.\n" + getCurrentHintText());
+					outWrite.println(newWonderResp.toString());
+				} else if (pendingCommand.equals("next")) {
+					if (hintIndex < MAX_HINTS - 1) {
+						hintIndex++;
+						JSONObject nextHintResp = new JSONObject();
+						nextHintResp.put("type", "prompt");
+						nextHintResp.put("value", "Showing next hint for the same wonder. (Hint " + (hintIndex + 1) + "/" + MAX_HINTS + ")\n" + getCurrentHintText());
+						nextHintResp.put("image", "the image: " + getCurrentHintImage());
+						outWrite.println(nextHintResp.toString());
+					} else {
+						JSONObject noMoreHintsResp = new JSONObject();
+						noMoreHintsResp.put("type", "prompt");
+						noMoreHintsResp.put("value", "No more hints for this wonder.");
+						outWrite.println(noMoreHintsResp.toString());
+					}
+				}
+				placeholderActive = false;
+				pendingCommand = "";
+				return;
+			}
+		}
+
+		// If no placeholder is active, check if command is "skip" or "next".
+		if (command.equals("skip") || command.equals("next")) {
+			placeholderActive = true;
+			pendingCommand = command;
+			JSONObject placeholderResp = new JSONObject();
+			if (command.equals("skip")) {
+				placeholderResp.put("value", "You chose to skip this wonder (0 points awarded).");
+			} else {
+				placeholderResp.put("value", "Preparing to show the next hint...");
+			}
+			placeholderResp.put("type", "prompt");
+			placeholderResp.put("image", "the image: img/placeholder.png");
+			outWrite.println(placeholderResp.toString());
+			return;
+		}
+
+		// "remain" or "remaining": show number of hints remaining.
+		if (command.equals("remain") || command.equals("remaining")) {
+			int hintsLeft = (MAX_HINTS - 1) - hintIndex;
+			response.put("type", "prompt");
+			response.put("value", "Hints remaining for this wonder: " + hintsLeft
+					+ "\n(You are currently on hint #" + (hintIndex + 1) + ")");
+			return;
+		}
+
+		// Otherwise, treat input as a guess.
+		if (command.equals(currentCorrectAnswer)) {
 			int remainingHints = (MAX_HINTS - 1) - hintIndex;
 			int scoreThisRound = remainingHints * 5 + 5;
 			int newTotal = updateScore(playerName, scoreThisRound);
-
 			roundsLeft--;
 			response.put("type", "result");
-			response.put("value",
-					"Correct! You earned " + scoreThisRound + " points this round."
-			);
+			response.put("value", "Correct! You earned " + scoreThisRound + " points this round.");
 			response.put("points", newTotal);
-
 			if (roundsLeft > 0) {
 				currentRound++;
 				selectRandomWonder();
 				response.put("image", "the image: " + getCurrentHintImage());
-				response.put("value",
-						"Correct! You earned " + scoreThisRound + " points.\n"
-								+ "Now starting round " + currentRound + " of " + totalRounds + ".\n"
-								+ "Rounds remaining: " + roundsLeft + "\n"
-								+ "Guess which wonder is shown."
-				);
+				response.put("value", "Correct! You earned " + scoreThisRound + " points.\nNow starting round " + currentRound + " of " + totalRounds
+						+ ".\nRounds remaining: " + roundsLeft + "\nGuess which wonder is shown.\n" + getCurrentHintText());
 			} else {
 				endGame(response);
 			}
-
-			// 2) Skip (Option B: Does NOT end the round; a new wonder is chosen for the same round)
-		} else if (guess.equals("skip")) {
-			response.put("type", "prompt");
-			response.put("value", "You chose to skip this wonder (0 points awarded).");
-
-			// Do NOT decrement roundsLeft or increment currentRound.
-			// Instead, pick a new wonder for the same round.
-			selectRandomWonder();
-			response.put("image", "the image: " + getCurrentHintImage());
-			response.put("value",
-					"Here is a new wonder for round " + currentRound + " of " + totalRounds + ".\n"
-							+ "Guess which wonder is shown."
-			);
-
-			// 3) Next => Show the next hint if available
-		} else if (guess.equals("next")) {
-			if (hintIndex < MAX_HINTS - 1) {
-				hintIndex++;
-				response.put("type", "prompt");
-				response.put("value",
-						"Showing next hint for the same wonder. (Hint " + (hintIndex + 1) + "/" + MAX_HINTS + ")"
-				);
-				response.put("image", "the image: " + getCurrentHintImage());
-			} else {
-				response.put("type", "prompt");
-				response.put("value", "No more hints for this wonder.");
-			}
-
-			// 4) Remain / Remaining => Show how many hints remain
-		} else if (guess.equals("remain") || guess.equals("remaining")) {
-			int hintsLeft = (MAX_HINTS - 1) - hintIndex;
-			response.put("type", "prompt");
-			response.put("value",
-					"Hints remaining for this wonder: " + hintsLeft
-							+ "\n(You are currently on hint #" + (hintIndex + 1) + ")"
-			);
-
-			// 5) Incorrect guess
 		} else {
 			response.put("type", "result");
-			response.put("value",
-					"Incorrect guess. Try again!\n"
-							+ "Or type 'skip', 'next', or 'remain'."
-			);
+			response.put("value", "Incorrect guess. Try again!\nOr type 'skip', 'next', or 'remain'.");
 		}
 	}
 
-	/**
-	 * Ends the game by showing the final score and then returning to the main menu.
-	 * If the final score is 0, sends "lose.jpg"; otherwise, sends "win.jpg".
-	 */
+	// -----------------------------
+	// END GAME
+	// -----------------------------
 	private static void endGame(JSONObject response) {
 		int finalScore = leaderboard.getOrDefault(playerName, 0);
 		if (finalScore == 0) {
 			response.put("type", "result");
-			response.put("value",
-					"Game over. You lose! Your final score was 0.\n"
-							+ "Returning to main menu...\n"
-							+ "1) See Leaderboard\n2) Start the game\n3) Quit"
-			);
+			response.put("value", "Game over. You lose! Your final score was 0.\nReturning to main menu...\n1) See Leaderboard\n2) Start the game\n3) Quit");
 			response.put("image", "the image: img/lose.jpg");
 		} else {
 			response.put("type", "result");
-			response.put("value",
-					"Game over. You win! Your final score was " + finalScore + ".\n"
-							+ "Returning to main menu...\n"
-							+ "1) See Leaderboard\n2) Start the game\n3) Quit"
-			);
+			response.put("value", "Game over. You win! Your final score was " + finalScore + ".\nReturning to main menu...\n1) See Leaderboard\n2) Start the game\n3) Quit");
 			response.put("image", "the image: img/win.jpg");
 		}
 		state = GameState.WAITING_FOR_CHOICE;
 	}
 
-	/**
-	 * Updates the user's score and saves the leaderboard to file.
-	 */
+	// -----------------------------
+	// UPDATE SCORE & SAVE LEADERBOARD
+	// -----------------------------
 	private static int updateScore(String name, int newScore) {
 		int oldScore = leaderboard.getOrDefault(name, 0);
 		int total = oldScore + newScore;
@@ -403,28 +417,35 @@ public class SockServer {
 		return total;
 	}
 
-	/**
-	 * Picks a random wonder from the list and resets hintIndex.
-	 */
+	// -----------------------------
+	// SELECT RANDOM WONDER & SHUFFLE HINTS
+	// -----------------------------
 	private static void selectRandomWonder() {
-		Random rand = new Random();
-		int index = rand.nextInt(wonderList.size());
-		currentWonder = wonderList.get(index);
+		int index = random.nextInt(wonderList.size());
+		Wonder base = wonderList.get(index);
+		// Create a new list from the base hints and shuffle to randomize order.
+		List<Hint> shuffled = new ArrayList<>(base.hints);
+		Collections.shuffle(shuffled, random);
+		currentWonder = new Wonder(shuffled, base.answer);
 		currentCorrectAnswer = currentWonder.answer;
 		hintIndex = 0;
 		System.out.println("** The correct answer is: " + currentCorrectAnswer + " **");
 	}
 
-	/**
-	 * Returns the current hint image path.
-	 */
+	// -----------------------------
+	// GET CURRENT HINT IMAGE & TEXT
+	// -----------------------------
 	private static String getCurrentHintImage() {
-		return currentWonder.images.get(hintIndex);
+		return currentWonder.hints.get(hintIndex).image;
 	}
 
-	/**
-	 * Builds and returns a sorted leaderboard string.
-	 */
+	private static String getCurrentHintText() {
+		return currentWonder.hints.get(hintIndex).funnyText;
+	}
+
+	// -----------------------------
+	// GET LEADERBOARD STRING
+	// -----------------------------
 	private static String getLeaderboardString() {
 		List<Map.Entry<String, Integer>> entries = new ArrayList<>(leaderboard.entrySet());
 		entries.sort((a, b) -> b.getValue() - a.getValue());
@@ -440,9 +461,9 @@ public class SockServer {
 		return sb.toString();
 	}
 
-	/**
-	 * Loads the leaderboard from the JSON file into the leaderboard map.
-	 */
+	// -----------------------------
+	// LOAD & SAVE LEADERBOARD
+	// -----------------------------
 	private static void loadLeaderboard() {
 		File file = new File(LEADERBOARD_FILE);
 		if (!file.exists()) {
@@ -462,9 +483,6 @@ public class SockServer {
 		}
 	}
 
-	/**
-	 * Saves the leaderboard map to the JSON file.
-	 */
 	private static void saveLeaderboard() {
 		JSONObject obj = new JSONObject();
 		for (Map.Entry<String, Integer> e : leaderboard.entrySet()) {
@@ -479,30 +497,23 @@ public class SockServer {
 		}
 	}
 
-	/**
-	 * Handles the case where the user provides only partial name/age input.
-	 */
+	// -----------------------------
+	// HANDLE PARTIAL NAME/AGE INPUT
+	// -----------------------------
 	private static void handlePartialNameAge(JSONObject response, String[] tokens) {
 		if (tokens.length == 1) {
 			try {
 				Integer.parseInt(tokens[0]);
 				response.put("type", "error");
-				response.put("value",
-						"You have only typed age. Please provide both name and age, e.g. \"Nupur 21\"."
-				);
+				response.put("value", "You have only typed age. Please provide both name and age, e.g. \"Nupur 21\".");
 			} catch (NumberFormatException nfe) {
 				response.put("type", "error");
-				response.put("value",
-						"You have only typed name. Please provide both name and age, e.g. \"Nupur 21\"."
-				);
+				response.put("value", "You have only typed name. Please provide both name and age, e.g. \"Nupur 21\".");
 			}
 		} else {
 			response.put("type", "error");
-			response.put("value",
-					"Please provide both name and age, e.g. \"Nupur 21\"."
-			);
+			response.put("value", "Please provide both name and age, e.g. \"Nupur 21\".");
 		}
 	}
 }
-
 
