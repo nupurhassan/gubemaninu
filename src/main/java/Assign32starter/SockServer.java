@@ -5,13 +5,21 @@ import java.io.*;
 import java.util.*;
 import org.json.*;
 
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.charset.StandardCharsets;
+
 /**
  * SockServer
  * ----------
- * Demonstrates:
- * - "next" command: move to the next hint (up to 4 hints per wonder)
- * - "remain"/"remaining" command: shows how many hints are left
- * - guess, skip, scoreboard, etc.
+ * Features:
+ * 1) Multiple Wonders (4 hints each)
+ * 2) Round-limited: user chooses # of rounds
+ * 3) Supports commands: skip, next, remain, guess
+ * 4) Score formula: (remainingHints * 5) + 5 for correct guess
+ * 5) Persistent Leaderboard (stored in leaderboard.json)
+ * 6) Displays "win.jpg" if user wins (>0 points) and "lose.jpg" if score is 0
+ * 7) Option B: When "skip" is typed, a new wonder is chosen for the same round.
  */
 public class SockServer {
 
@@ -37,10 +45,15 @@ public class SockServer {
 	private static int roundsLeft = 0;
 	private static int currentRound = 0;
 
-	// Leaderboard storing total points per player
-	private static Map<String,Integer> leaderboard = new HashMap<>();
+	// ---------------------------
+	// LEADERBOARD
+	// ---------------------------
+	private static Map<String, Integer> leaderboard = new HashMap<>();
+	private static final String LEADERBOARD_FILE = "leaderboard.json";
 
-	// Each wonder has 4 hints (images) and an answer
+	// ---------------------------
+	// WONDER DATA
+	// ---------------------------
 	private static class Wonder {
 		List<String> images;
 		String answer;
@@ -50,7 +63,7 @@ public class SockServer {
 		}
 	}
 
-	// Our wonders
+	// List of wonders (with 4 hints each)
 	private static List<Wonder> wonderList = new ArrayList<>(Arrays.asList(
 			new Wonder(
 					Arrays.asList("img/Colosseum1.png", "img/Colosseum2.png", "img/Colosseum3.png", "img/Colosseum4.png"),
@@ -66,15 +79,18 @@ public class SockServer {
 			)
 	));
 
-	// Current wonder/hint
+	// Current wonder/hint information
 	private static Wonder currentWonder = null;
 	private static int hintIndex = 0;  // 0..3 for 4 hints
 	private static final int MAX_HINTS = 4;
 	private static String currentCorrectAnswer = "";
 
 	public static void main(String[] args) {
+		// Load persistent leaderboard if available
+		loadLeaderboard();
+
 		try (ServerSocket serv = new ServerSocket(8888)) {
-			System.out.println("Server ready for connection");
+			System.out.println("Server ready for connection on port 8888");
 
 			while (true) {
 				try {
@@ -91,7 +107,7 @@ public class SockServer {
 	}
 
 	/**
-	 * Handle each client connection in a separate method
+	 * Handle a client connection by reading a JSON request and sending a JSON response.
 	 */
 	private static void handleClient(Socket sock) {
 		try (ObjectInputStream in = new ObjectInputStream(sock.getInputStream());
@@ -100,7 +116,7 @@ public class SockServer {
 			String inputStr = (String) in.readObject();
 			System.out.println("Server received: " + inputStr);
 
-			// Attempt to parse JSON
+			// Parse JSON request
 			JSONObject request;
 			try {
 				request = new JSONObject(inputStr);
@@ -112,7 +128,7 @@ public class SockServer {
 				return;
 			}
 
-			// Prepare response
+			// Prepare response JSON
 			JSONObject response = new JSONObject();
 			String type = request.optString("type", "unknown");
 			String value = request.optString("value", "").trim();
@@ -149,7 +165,6 @@ public class SockServer {
 						break;
 				}
 			} catch (Exception e) {
-				// Catch any unexpected runtime error
 				response.put("type", "error");
 				response.put("value", "An unexpected error occurred: " + e.getMessage());
 				e.printStackTrace();
@@ -209,17 +224,14 @@ public class SockServer {
 			String lb = getLeaderboardString();
 			response.put("type", "prompt");
 			response.put("value", lb);
-			// remain in WAITING_FOR_CHOICE
 		} else if (value.equals("2")) {
-			// Ask how many rounds
+			// Ask how many rounds to play
 			response.put("type", "prompt");
 			response.put("value", "Please enter the number of rounds the game should last.");
 			state = GameState.WAITING_FOR_ROUNDS;
 		} else if (value.equals("3")) {
-			// Quit
 			response.put("type", "result");
 			response.put("value", "Quitting. Thanks for visiting!\n(quitting)");
-			// remain in WAITING_FOR_CHOICE
 		} else {
 			response.put("type", "error");
 			response.put("value", "Please enter 1, 2 or 3.");
@@ -253,7 +265,6 @@ public class SockServer {
 								+ "Now starting round " + currentRound + " of " + totalRounds + ".\n"
 								+ "Guess which wonder is shown."
 				);
-				// Move to guess state
 				state = GameState.WAITING_FOR_GUESS;
 			}
 		} catch (NumberFormatException nfe) {
@@ -267,10 +278,10 @@ public class SockServer {
 	// -----------------------------
 	/**
 	 * The user can:
-	 * - Type a guess (compare to currentCorrectAnswer)
-	 * - Type "skip" (forfeit round, 0 points)
-	 * - Type "next" (show next hint if available)
-	 * - Type "remain"/"remaining" (show how many hints left)
+	 * - Type a guess (to be compared to the current wonder's answer)
+	 * - Type "skip" to discard the current wonder and get a new one for the same round (Option B)
+	 * - Type "next" to show the next hint if available
+	 * - Type "remain" or "remaining" to see how many hints remain
 	 */
 	private static void handleGuess(JSONObject response, String type, String value) {
 		if (!type.equals("input") || value.isEmpty()) {
@@ -282,7 +293,7 @@ public class SockServer {
 
 		// 1) Correct guess
 		if (guess.equals(currentCorrectAnswer)) {
-			int remainingHints = (MAX_HINTS - 1) - hintIndex;  // e.g. if hintIndex=0 => 3 remain
+			int remainingHints = (MAX_HINTS - 1) - hintIndex;
 			int scoreThisRound = remainingHints * 5 + 5;
 			int newTotal = updateScore(playerName, scoreThisRound);
 
@@ -291,7 +302,6 @@ public class SockServer {
 			response.put("value",
 					"Correct! You earned " + scoreThisRound + " points this round."
 			);
-			// Send total points to the client
 			response.put("points", newTotal);
 
 			if (roundsLeft > 0) {
@@ -308,30 +318,21 @@ public class SockServer {
 				endGame(response);
 			}
 
-			// 2) Skip => 0 points
+			// 2) Skip (Option B: Does NOT end the round; a new wonder is chosen for the same round)
 		} else if (guess.equals("skip")) {
-			roundsLeft--;
 			response.put("type", "prompt");
-			response.put("value", "You chose to skip this round (0 points).");
+			response.put("value", "You chose to skip this wonder (0 points awarded).");
 
-			if (roundsLeft > 0) {
-				currentRound++;
-				selectRandomWonder();
-				response.put("image", "the image: " + getCurrentHintImage());
-				response.put("value",
-						"Now starting round " + currentRound + " of " + totalRounds + ".\n"
-								+ "Rounds remaining: " + roundsLeft + "\n"
-								+ "Guess which wonder is shown."
-				);
-			} else {
-				endGame(response);
-				response.put("type", "result");
-				response.put("value",
-						"You chose to skip the last round. Game over."
-				);
-			}
+			// Do NOT decrement roundsLeft or increment currentRound.
+			// Instead, pick a new wonder for the same round.
+			selectRandomWonder();
+			response.put("image", "the image: " + getCurrentHintImage());
+			response.put("value",
+					"Here is a new wonder for round " + currentRound + " of " + totalRounds + ".\n"
+							+ "Guess which wonder is shown."
+			);
 
-			// 3) Next => Show next hint if available
+			// 3) Next => Show the next hint if available
 		} else if (guess.equals("next")) {
 			if (hintIndex < MAX_HINTS - 1) {
 				hintIndex++;
@@ -345,7 +346,7 @@ public class SockServer {
 				response.put("value", "No more hints for this wonder.");
 			}
 
-			// 4) Remain / Remaining => Show how many hints left
+			// 4) Remain / Remaining => Show how many hints remain
 		} else if (guess.equals("remain") || guess.equals("remaining")) {
 			int hintsLeft = (MAX_HINTS - 1) - hintIndex;
 			response.put("type", "prompt");
@@ -365,7 +366,8 @@ public class SockServer {
 	}
 
 	/**
-	 * End the game, show final score, then return to WAITING_FOR_CHOICE (main menu).
+	 * Ends the game by showing the final score and then returning to the main menu.
+	 * If the final score is 0, sends "lose.jpg"; otherwise, sends "win.jpg".
 	 */
 	private static void endGame(JSONObject response) {
 		int finalScore = leaderboard.getOrDefault(playerName, 0);
@@ -376,6 +378,7 @@ public class SockServer {
 							+ "Returning to main menu...\n"
 							+ "1) See Leaderboard\n2) Start the game\n3) Quit"
 			);
+			response.put("image", "the image: img/lose.jpg");
 		} else {
 			response.put("type", "result");
 			response.put("value",
@@ -383,24 +386,25 @@ public class SockServer {
 							+ "Returning to main menu...\n"
 							+ "1) See Leaderboard\n2) Start the game\n3) Quit"
 			);
+			response.put("image", "the image: img/win.jpg");
 		}
-		// Return to main menu
 		state = GameState.WAITING_FOR_CHOICE;
 	}
 
 	/**
-	 * Updates the user's total score
+	 * Updates the user's score and saves the leaderboard to file.
 	 */
 	private static int updateScore(String name, int newScore) {
 		int oldScore = leaderboard.getOrDefault(name, 0);
 		int total = oldScore + newScore;
 		leaderboard.put(name, total);
 		System.out.println("Updated " + name + "'s total score to " + total);
+		saveLeaderboard();
 		return total;
 	}
 
 	/**
-	 * Picks a random wonder, resets hintIndex=0
+	 * Picks a random wonder from the list and resets hintIndex.
 	 */
 	private static void selectRandomWonder() {
 		Random rand = new Random();
@@ -412,25 +416,23 @@ public class SockServer {
 	}
 
 	/**
-	 * Returns the current hint image path
+	 * Returns the current hint image path.
 	 */
 	private static String getCurrentHintImage() {
 		return currentWonder.images.get(hintIndex);
 	}
 
 	/**
-	 * Builds and returns a sorted leaderboard string
+	 * Builds and returns a sorted leaderboard string.
 	 */
 	private static String getLeaderboardString() {
-		List<Map.Entry<String,Integer>> entries = new ArrayList<>(leaderboard.entrySet());
-		// Sort by total points descending
-		entries.sort((a,b)-> b.getValue() - a.getValue());
-
+		List<Map.Entry<String, Integer>> entries = new ArrayList<>(leaderboard.entrySet());
+		entries.sort((a, b) -> b.getValue() - a.getValue());
 		StringBuilder sb = new StringBuilder("Leaderboard:\n");
 		if (entries.isEmpty()) {
 			sb.append("No scores yet!\n");
 		} else {
-			for (Map.Entry<String,Integer> e : entries) {
+			for (Map.Entry<String, Integer> e : entries) {
 				sb.append(e.getKey()).append(" - ").append(e.getValue()).append(" points\n");
 			}
 		}
@@ -439,7 +441,46 @@ public class SockServer {
 	}
 
 	/**
-	 * Handle partial name/age input
+	 * Loads the leaderboard from the JSON file into the leaderboard map.
+	 */
+	private static void loadLeaderboard() {
+		File file = new File(LEADERBOARD_FILE);
+		if (!file.exists()) {
+			System.out.println("No leaderboard file found, starting fresh.");
+			return;
+		}
+		try {
+			String content = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
+			JSONObject obj = new JSONObject(content);
+			for (String key : obj.keySet()) {
+				leaderboard.put(key, obj.getInt(key));
+			}
+			System.out.println("Loaded leaderboard from " + LEADERBOARD_FILE);
+		} catch (IOException | JSONException e) {
+			e.printStackTrace();
+			System.out.println("Failed to load leaderboard. Starting with empty data.");
+		}
+	}
+
+	/**
+	 * Saves the leaderboard map to the JSON file.
+	 */
+	private static void saveLeaderboard() {
+		JSONObject obj = new JSONObject();
+		for (Map.Entry<String, Integer> e : leaderboard.entrySet()) {
+			obj.put(e.getKey(), e.getValue());
+		}
+		try {
+			Files.write(Paths.get(LEADERBOARD_FILE), obj.toString(2).getBytes(StandardCharsets.UTF_8));
+			System.out.println("Saved leaderboard to " + LEADERBOARD_FILE);
+		} catch (IOException e) {
+			e.printStackTrace();
+			System.out.println("Failed to save leaderboard.");
+		}
+	}
+
+	/**
+	 * Handles the case where the user provides only partial name/age input.
 	 */
 	private static void handlePartialNameAge(JSONObject response, String[] tokens) {
 		if (tokens.length == 1) {
@@ -463,4 +504,5 @@ public class SockServer {
 		}
 	}
 }
+
 
