@@ -15,8 +15,14 @@ import javax.swing.JDialog;
 import javax.swing.WindowConstants;
 
 /**
- * Minimal example client that sends 'hello' first,
- * then sends user input for name+age, then guess.
+ * ClientGui.java
+ *
+ * - Sends user input as JSON ("type":"input","value":...).
+ * - Receives server responses and displays them.
+ * - Clears the input field after each submission.
+ * - If "points" is in the JSON, updates the label "Current Points this round: X".
+ * - If "quitting" is in the server message, exits the application.
+ * - If "game over" is in the server message, prompts user to return to main menu.
  */
 public class ClientGui implements OutputPanel.EventHandlers {
 	JDialog frame;
@@ -28,7 +34,6 @@ public class ClientGui implements OutputPanel.EventHandlers {
 	ObjectOutputStream os;
 	BufferedReader bufferedReader;
 
-	// Adjust these as needed
 	String host = "localhost";
 	int port = 8888;
 
@@ -41,7 +46,7 @@ public class ClientGui implements OutputPanel.EventHandlers {
 		frame.setMinimumSize(new Dimension(500, 500));
 		frame.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
 
-		// Setup top picture panel
+		// Setup the top picture panel
 		picPanel = new PicturePanel();
 		GridBagConstraints c = new GridBagConstraints();
 		c.gridx = 0;
@@ -49,7 +54,7 @@ public class ClientGui implements OutputPanel.EventHandlers {
 		c.weighty = 0.25;
 		frame.add(picPanel, c);
 
-		// Setup input, button, and output area
+		// Setup the input, button, and output area
 		c = new GridBagConstraints();
 		c.gridx = 0;
 		c.gridy = 1;
@@ -60,83 +65,103 @@ public class ClientGui implements OutputPanel.EventHandlers {
 		outputPanel.addEventHandlers(this);
 		frame.add(outputPanel, c);
 
-		// Initialize a small 1x1 grid with a placeholder image
+		// Initialize a 1x1 grid with a placeholder image
 		picPanel.newGame(1);
-		insertImage("img/Colosseum1.png", 0, 0);
-
-		// Connect to server, send "hello", read the response
-		open();
 		try {
-			JSONObject helloRequest = new JSONObject();
-			helloRequest.put("type", "hello");
-			helloRequest.put("value", "");
-			os.writeObject(helloRequest.toString());
+			insertImage("img/hi.png", 0, 0);
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
 
-		String response = this.bufferedReader.readLine();
-		System.out.println("Got a connection to server");
-		JSONObject json = new JSONObject(response);
-		outputPanel.appendOutput(json.optString("value"));
-		close();
+		// Do an initial handshake with the server
+		connectAndSayHello();
 	}
 
-	/**
-	 * Show the GUI
-	 */
 	public void show(boolean makeModal) {
 		frame.pack();
 		frame.setModal(makeModal);
 		frame.setVisible(true);
 	}
 
-	public void newGame(int dimension) {
-		picPanel.newGame(dimension);
-		outputPanel.appendOutput("Started new game with a " + dimension + "x" + dimension + " board.");
-	}
-
 	public boolean insertImage(String filename, int row, int col) throws IOException {
+		System.out.println("[CLIENT] Inserting image: " + filename);
 		try {
 			if (picPanel.insertImage(filename, row, col)) {
-				outputPanel.appendOutput("Inserting " + filename + " in position (" + row + ", " + col + ")");
+				outputPanel.appendOutput("Displaying " + filename + " at (" + row + ", " + col + ")");
 				return true;
 			}
-			outputPanel.appendOutput("File(\"" + filename + "\") not found.");
+			outputPanel.appendOutput("File (" + filename + ") not found.");
 		} catch (PicturePanel.InvalidCoordinateException e) {
 			outputPanel.appendOutput(e.toString());
 		}
 		return false;
 	}
 
-	/**
-	 * Called when the Submit button is clicked in the GUI.
-	 * We simply send whatever the user typed to the server as "type":"input".
-	 */
 	@Override
 	public void submitClicked() {
+		System.out.println("[CLIENT] Submit clicked.");
 		try {
 			open();
-			String userInput = outputPanel.getInputText();
 
+			String userInput = outputPanel.getInputText();
 			JSONObject request = new JSONObject();
 			request.put("type", "input");
 			request.put("value", userInput);
+			System.out.println("[CLIENT] Sending: " + request.toString());
 			os.writeObject(request.toString());
 
+			// Clear the input field after sending
+			outputPanel.setInputText("");
+
+			// Wait for server response
 			String responseStr = bufferedReader.readLine();
+			if (responseStr == null) {
+				outputPanel.appendOutput("Server disconnected unexpectedly.");
+				return;
+			}
+			System.out.println("[CLIENT] Received: " + responseStr);
+
 			JSONObject jsonResponse = new JSONObject(responseStr);
-			outputPanel.appendOutput(jsonResponse.optString("value"));
+			String serverMessage = jsonResponse.optString("value", "");
+			outputPanel.appendOutput(serverMessage);
+
+			// If server included "points", update the UI label
+			if (jsonResponse.has("points")) {
+				int points = jsonResponse.getInt("points");
+				outputPanel.setPoints(points);  // "Current Points this round: X"
+			}
+
+			// If there's an image, display it
+			if (jsonResponse.has("image")) {
+				String imageStr = jsonResponse.optString("image");
+				// e.g. "the image: img/Colosseum2.png"
+				String[] tokens = imageStr.split(" ");
+				String fileName = tokens[tokens.length - 1];
+				picPanel.newGame(1);
+				insertImage(fileName, 0, 0);
+			}
+
+			// If user chose to quit
+			if (serverMessage.toLowerCase().contains("quitting")) {
+				outputPanel.appendOutput("Exiting client...");
+				System.exit(0);
+			}
+
+			// If game over, prompt for main menu
+			if (serverMessage.toLowerCase().contains("game over")) {
+				outputPanel.appendOutput("Returning to main menu.\nType '1' for Leaderboard, '2' to start new game, or '3' to quit.");
+			}
 
 			close();
 		} catch (IOException e) {
+			outputPanel.appendOutput("Network error: " + e.getMessage());
 			e.printStackTrace();
 		}
 	}
 
 	@Override
 	public void inputUpdated(String input) {
-		// Optionally do something if needed
+		// optional
 	}
 
 	public void open() throws UnknownHostException, IOException {
@@ -144,11 +169,13 @@ public class ClientGui implements OutputPanel.EventHandlers {
 		this.out = sock.getOutputStream();
 		this.os = new ObjectOutputStream(out);
 		this.bufferedReader = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+		System.out.println("[CLIENT] Connection opened to " + host + ":" + port);
 	}
 
 	public void close() {
+		System.out.println("[CLIENT] Closing connection.");
 		try {
-			if (out != null) out.close();
+			if (os != null) os.close();
 			if (bufferedReader != null) bufferedReader.close();
 			if (sock != null) sock.close();
 		} catch (Exception e) {
@@ -156,12 +183,30 @@ public class ClientGui implements OutputPanel.EventHandlers {
 		}
 	}
 
-	public static void main(String[] args) throws IOException {
+	private void connectAndSayHello() {
 		try {
-			String host = "localhost";
-			int port = 8888;
-			ClientGui main = new ClientGui(host, port);
-			main.show(true);
+			open();
+			JSONObject helloReq = new JSONObject();
+			helloReq.put("type", "hello");
+			helloReq.put("value", "");
+			System.out.println("[CLIENT] Sending initial hello: " + helloReq.toString());
+			os.writeObject(helloReq.toString());
+
+			String resp = bufferedReader.readLine();
+			System.out.println("[CLIENT] Received handshake: " + resp);
+			JSONObject jResp = new JSONObject(resp);
+			outputPanel.appendOutput(jResp.optString("value", ""));
+			close();
+		} catch (IOException | JSONException e) {
+			outputPanel.appendOutput("Error during handshake: " + e.getMessage());
+			e.printStackTrace();
+		}
+	}
+
+	public static void main(String[] args) {
+		try {
+			ClientGui client = new ClientGui("localhost", 8888);
+			client.show(true);
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
